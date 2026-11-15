@@ -1,10 +1,13 @@
 # 术语表
 
+本表按**接入 Electron 后的目标架构**解释术语，只有 `ToolRisk / risk` 等少数行记录阶段 1 的实际语义。阶段 1 的已实现代码更轻：循环由 Pi SDK 的 `createAgentSession()` 拥有，`src/run.ts` 只装配会话，工具是 `{ name, inputSchema, risk, run }`，模型配置在 `src/model.ts`；没有 `Core / RunManager / ToolService / Adapter / IPC` 这些运行实体。下表出现的这些名称属于后续设计目标，见[架构文档第 1 节](../architecture/2026-10-12-agent-desktop-design.md)的「已实现 vs 目标形态」对照表。
+
 | 术语 | 简单解释 | 在本项目中的边界 |
 | --- | --- | --- |
-| Agent | 会组织多轮模型请求并决定何时调用工具的运行时 | Pi 是首个 Agent 实现，Core 通过 Adapter 使用它 |
-| Agent Loop | “请求模型 → 处理回复 → 执行工具 → 把结果交回模型”的循环 | 由 Agent Adapter/Pi 拥有，不在 UI 或 RunManager 中重复实现 |
-| Adapter | 把通用接口翻译成具体实现的适配器 | 负责 Pi 的 SDK 类型、事件和模型连接，不负责审批规则 |
+| Agent | 会组织多轮模型请求并决定何时调用工具的运行时 | 阶段 1 直接用 Pi 的 `AgentSession`；目标形态下 Core 通过 Adapter 使用它 |
+| Agent Loop | “请求模型 → 处理回复 → 执行工具 → 把结果交回模型”的循环 | 由 Pi 拥有，不在 UI、`run.ts` 或 RunManager 中重复实现 |
+| Adapter | 把通用接口翻译成具体实现的适配器 | 目标形态负责 SDK 类型与事件转换；阶段 1 只接 Pi，不需要这一层 |
+| AgentSession | Pi SDK 通过 `createAgentSession()` 创建的一次会话 | 阶段 1 唯一的会话入口，拥有循环、工具登记、扩展与事件订阅 |
 | Application Module | 一个工作场景的组合包 | Coding 组合编程工具、提示词和视图，不拥有 Core |
 | Artifact | 可单独查看的文件或输出 | Diff、长命令输出等，通过引用而不是无限塞进消息 |
 | Approval | 用户对一次具体高风险 ToolCall 的决定 | 允许一次、拒绝一次或取消，不能改写原请求 |
@@ -22,7 +25,8 @@
 | Repository | 保存和读取领域数据的接口 | 首版用 JSON 实现，未来可换 SQLite |
 | Run | 处理一次用户输入的过程 | 内部可以包含多轮模型请求和多个 ToolCall |
 | Session | 一个持续对话 | 固定工作区、应用、Agent 和模型配置 |
-| Tool | Agent 可请求的具体能力 | 由 ToolService 校验、审批、执行并返回结果 |
+| Tool | Agent 可请求的具体能力 | 目标形态由 ToolService 把关；阶段 1 转成 SDK `customTools`，审批在 `tool_call` 扩展里 |
+| ToolRisk / risk | 工具定义里由受信任代码标注的风险档位 | 目标形态分 read / write / execute；阶段 1 只区分 read 与「非 read」，execute 无工具声明，审批请求中的 risk 也无读取方 |
 | ToolCall | 一次具体工具请求 | 只属于一个 Run，审批绑定它的参数和身份 |
 | ToolService | 工具调用的唯一门口 | Registry 找工具，Service 决定是否可执行 |
 | Workspace | 用户选定的本地项目目录 | 文件操作以它为根，不信任 UI 当前标签 |

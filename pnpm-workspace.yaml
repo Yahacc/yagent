@@ -1,0 +1,4 @@
+# pnpm 12 的项目级设置只从 pnpm-workspace.yaml 读取（.npmrc 仅保留认证设置）。
+# 本项目无需任何依赖的 postinstall：esbuild 等由平台预编译包提供，Pi 的依赖也不需要构建脚本。
+ignoreScripts: true
+strictDepBuilds: false
