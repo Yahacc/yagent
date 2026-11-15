@@ -15,35 +15,40 @@ flowchart TD
   E --> F[阶段 6：扩展验证与 Windows 打包]
 ```
 
-CLI 是学习入口，未来仍可作为调试工具；它和 Electron 复用 Core、Adapter、Registry，只替换输入输出和审批实现。
+CLI 是学习入口，未来仍可作为调试工具。阶段 1 的注入直接写在 `cli.ts`；阶段 3 引入 Electron 时才把注入抽成共用装配，让两个入口复用同一条循环，只替换输入输出和审批实现。不要把目标形态的 Core / ToolService 当成阶段 1 已有的东西。
 
 ## 2. 阶段 1：先看清楚一条工具调用
 
-**要理解：** Session、Run、ToolCall 的关系，以及“模型请求工具”和“应用执行工具”是不同步骤。
+**要理解：** 一次普通大模型调用需要注入什么，以及“模型请求工具”和“应用执行工具”是不同步骤。
 
-**要交付：** Node CLI、MockAgentAdapter、简单 ToolRegistry/ToolService、终端审批。先用内存数据，不接 Electron 和付费模型。
+**要交付：** Node CLI、一张 Agent 注册表（阶段 1 只有 Mock）、工具清单与参数校验、一条直线循环、终端审批。先用内存数据，不接 Electron 和付费模型。
 
 ```mermaid
 sequenceDiagram
   participant C as CLI
-  participant R as RunManager
-  participant A as Mock Agent
-  participant T as ToolService
-  C->>R: 输入一个任务
-  R->>A: prompt
-  A->>T: 请求演示工具
-  T->>C: 请求允许一次
-  C->>T: 用户确认
-  T-->>A: 演示结果
-  A-->>R: 输出最终回复并结束
-  R-->>C: 显示 Run 结果
+  participant L as run.ts 循环
+  participant A as Agent
+  participant T as 工具 run()
+  C->>L: 注入 agent / prompt / tools / approve / print
+  loop 直到 Agent 返回 done
+    L->>A: agent(messages, tools)
+    A-->>L: message 或 tool_call
+    L->>C: print 文字
+    L->>C: approve 展示真实参数（仅高风险工具）
+    C-->>L: allow / deny / cancel
+    L->>T: 执行并拿到 ToolResult
+    L->>A: 结果回灌 messages
+  end
+  L-->>C: RunResult（completed / cancelled / failed）
 ```
 
-先使用没有文件副作用的 `demo.echo`；理解请求后再增加临时工作区的 `coding.read_file`。Mock 不实现大模型，只按固定步骤调用工具并产生事件。
+和普通 LLM API 开发的差别只有两点：多一张 `Map<string, Agent>` 便于阶段 2 换 Pi；审批是循环里的一个分支。工具 `run()` 只返回结果，不认识界面，也不打印。审批按 `risk === "read"` 判断，阶段 1 只有 read / 非 read 两档行为，三档枚举与 GUI 展示属于后续目标，见[阶段 1 说明](../stages/01-cli-mock.md)「risk 现在到底做什么」。
 
-**验收：** 允许和拒绝产生不同结果；取消审批后工具没有执行；解释得出谁拥有循环、谁拥有权限；测试无需 API Key。
+先使用没有文件副作用的 `demo.confirm` 演练审批；`coding.read_file` 用临时工作区验证路径边界。Mock 不接大模型，只按上下文返回下一步。
 
-**阶段结束时能回答：** 为什么 ToolRegistry 本身不是安全检查？Core 为什么不直接调用 Pi？
+**验收：** 允许、拒绝、取消产生不同结果；取消审批后工具没有执行；解释得出谁拥有循环、谁拥有权限；测试无需 API Key。
+
+**阶段结束时能回答：** 为什么工具定义本身不是安全检查？阶段 2 换 Pi 时为什么不用改循环和工具？
 
 ## 3. 阶段 2：接入 Pi 和真实模型
 
@@ -55,29 +60,29 @@ sequenceDiagram
 
 **要交付：** PiAgentAdapter，ModelProfile，一个 OpenAI Chat-compatible 配置，异步流式输出与取消。仍使用 CLI。
 
-**验收：** 不修改 Core/工具即可选 Pi 或 Mock；错误认证显示清晰错误；纯文本结束后只有一个终态；取消后不再继续发起模型请求。
+**验收：** 不修改 `run.ts` 循环与工具即可选 Pi 或 Mock；错误认证显示清晰错误；纯文本结束后只有一个终态；取消后不再继续发起模型请求。
 
 **2a 结束能回答：** 一次对话的上下文由哪些消息组成？为什么 Adapter 要转换事件？
 
 **步骤 2b：对话 + 只读工具**
 
-**要交付：** 工具代理：Pi 的工具 execute 转为 `bridge.invokeTool()`，接入阶段 1 的 `coding.read_file`；工具结果回填 Agent 上下文继续对话。
+**要交付：** 工具代理：Pi 的工具 execute 转为 `bridge.invokeTool()`，接入阶段 1 的 `coding.read_file`；工具结果回填 Agent 上下文继续对话。`bridge` 与 Core 都是本阶段新建的边界，阶段 1 只有一条循环和一组工具定义。
 
-**验收：** 越出工作区的读取被拒绝且 Agent 收到结构化失败结果；取消传播到工具调用；同一问题在 Pi 与 Mock 下走相同 Core/审批路径。
+**验收：** 越出工作区的读取被拒绝且 Agent 收到结构化失败结果；取消传播到工具调用；同一问题在 Pi 与 Mock 下走相同的循环与审批路径。
 
 **2b 结束能回答：** 工具结果在上下文里长什么样？一次 Run 为什么可能有多次模型请求？
 
 ```mermaid
 flowchart LR
-  CLI[原有 CLI] --> Core[原有 Core]
-  Core --> Registry[AgentRegistry]
-  Registry --> Mock[Mock Adapter]
-  Registry --> Pi[新增 Pi Adapter]
+  CLI[阶段 1 CLI] --> Loop[run.ts 直线循环]
+  Loop --> Registry[AgentRegistry]
+  Registry --> Mock[Mock Agent]
+  Registry --> Pi[阶段 2 新增 Pi Adapter]
   Pi --> Model[Pi AI 和真实 Endpoint]
-  Pi --> Tools[原有 ToolService]
+  Loop --> Tools[工具清单 + 审批分支]
 ```
 
-核对所固定 Pi 版本的真实类型与事件；不要根据其他项目补丁猜 API。
+图中 `run.ts 循环`、`AgentRegistry`、工具清单都是阶段 1 已有；`Pi Adapter` 是阶段 2 新增。Core、ToolService、bridge 尚未建立，不要在阶段 1 代码里找它们。核对所固定 Pi 版本的真实类型与事件；不要根据其他项目补丁猜 API。
 
 ## 4. 阶段 3：把输入输出换成桌面界面
 
@@ -91,8 +96,8 @@ flowchart LR
 flowchart LR
   UI[React 界面] --> Bridge[Preload API]
   Bridge --> IPC[Main IPC Handler]
-  IPC --> Core[复用 Core]
-  Core -->|事件| IPC
+  IPC --> Loop[复用 run.ts 循环]
+  Loop -->|结果| IPC
   IPC -->|通知| UI
 ```
 

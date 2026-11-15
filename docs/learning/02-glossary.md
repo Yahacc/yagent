@@ -1,5 +1,7 @@
 # 术语表
 
+本表按**接入 Pi + Electron 后的目标架构**解释术语，只有 `ToolRisk / risk` 一行记录阶段 1 的实际语义。阶段 1 的已实现代码更轻：`Agent` 是一个返回下一步的函数，循环在 `src/run.ts`，工具是 `{ name, inputSchema, risk, run }`，没有 `Core / RunManager / ToolService / Adapter / IPC` 这些运行实体。下表出现的这些名称属于阶段 2 之后的设计目标，见[架构文档第 1 节](../architecture/2026-10-12-agent-desktop-design.md)的「已实现 vs 目标形态」对照表。
+
 | 术语 | 简单解释 | 在本项目中的边界 |
 | --- | --- | --- |
 | Agent | 会组织多轮模型请求并决定何时调用工具的运行时 | Pi 是首个 Agent 实现，Core 通过 Adapter 使用它 |
@@ -23,6 +25,7 @@
 | Run | 处理一次用户输入的过程 | 内部可以包含多轮模型请求和多个 ToolCall |
 | Session | 一个持续对话 | 固定工作区、应用、Agent 和模型配置 |
 | Tool | Agent 可请求的具体能力 | 由 ToolService 校验、审批、执行并返回结果 |
+| ToolRisk / risk | 工具定义里由受信任代码标注的风险档位 | 目标形态分 read / write / execute；阶段 1 只区分 read 与「非 read」，execute 无工具声明，审批请求中的 risk 也无读取方 |
 | ToolCall | 一次具体工具请求 | 只属于一个 Run，审批绑定它的参数和身份 |
 | ToolService | 工具调用的唯一门口 | Registry 找工具，Service 决定是否可执行 |
 | Workspace | 用户选定的本地项目目录 | 文件操作以它为根，不信任 UI 当前标签 |

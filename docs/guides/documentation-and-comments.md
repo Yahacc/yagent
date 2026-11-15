@@ -51,23 +51,30 @@ flowchart TD
 
 注释不追求数量。下面这些情况值得解释：调用者必须遵守的约束、异步生命周期、错误后的行为、数据来源、外部系统限制。
 
-例如 Agent 接口需要说明结束和取消的含义；仅靠 `Promise<void>` 看不出这些约束：
+例如 Agent 接口需要说明"返回值由谁解释"；只看函数签名不知道 `tool_call` 会不会被执行、由谁执行：
 
 ```typescript
-interface AgentSession {
-  /** 本次模型与工具循环全部结束后才 resolve；失败 reject；用户取消不算失败。 */
-  prompt(input: string): Promise<void>;
+/** 只返回下一步；不执行工具、不打印、不决定是否批准。 */
+type Agent = (
+  messages: ChatMessage[],
+  tools: ToolDefinition[],
+) => ModelReply | Promise<ModelReply>;
 
-  /** 等待运行停止，不只发出中止通知；相关命令由 Core 同时取消。 */
-  abort(): Promise<void>;
-}
+/** 循环据此分支：message 打印，tool_call 先校验权限再执行，done 结束。 */
+type ModelReply =
+  | { kind: "message"; text: string }
+  | { kind: "tool_call"; name: string; input: unknown }
+  | { kind: "done" };
 ```
 
-例如审批可能在 UI 取消后迟到，代码附近可以说明生命周期约束：
+例如取消决定在循环里只占一个分支，代码附近可以说明它不负责什么：
 
 ```typescript
-// 审批可能晚于取消到达；授权只能用于仍活动的 Run。
-const activeRun = runManager.requireActiveRun(request.runId);
+// 阶段 1 没有流式请求或子进程要中断，cancel 只结束本次循环。
+if (decision === "cancel") {
+  status = "cancelled";
+  break;
+}
 ```
 
 不要写这种逐行复述：
@@ -87,6 +94,7 @@ return result;
 接口改名、状态变化或新增审批分支时，检查四件事：
 
 - 类型定义与代码示例是否一致。
+- 枚举值、字段和接口是否都有对应的分支或读取方；没有的要写明是预留、还是应当删掉。阶段 1 的 `ToolRisk` 三档枚举只有两档行为、`ApprovalRequest.risk` 无读取方，就是必须写进阶段说明的反例。
 - 图里的职责归属是否仍成立。
 - 成功、拒绝、取消和失败路径是否都有说明。
 - 示例能否在不调用付费模型的情况下，用 Mock/临时工作区观察。

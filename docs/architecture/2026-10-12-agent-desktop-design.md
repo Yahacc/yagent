@@ -14,6 +14,24 @@
 
 代码示例用于解释边界，是拟议的产品接口，不是 Pi SDK 的原有 API。尚未实现的类型会在对应章节解释，具体签名在实施时通过契约测试验证。
 
+**本文描述的是接入 Pi + Electron 后的目标形态；阶段 1 的已实现代码要简单得多。** 当前（2026-11-15）阶段 1 注入 `Agent` / `systemPrompt` / `tools` / `approve` / `print`，在 `src/run.ts` 里跑一条直线循环：取下一步 → 判断 message 或 tool_call → 校验参数 → 判断权限 → 执行 → 打印 → 结果回灌。工具只返回 `ToolResult`，不认识界面；打印只有一个出口。阶段 1 的实际结构、运行、验收与当前限制见[阶段 1 说明](../stages/01-cli-mock.md)。
+
+下表是阅读本文时最容易误判的边界。**「阶段 1」一列是代码事实，本文其余章节描述的多是目标形态**：
+
+| 关注点 | 阶段 1 已实现（代码事实） | 本文的目标形态 | 何时才引入 |
+| --- | --- | --- | --- |
+| 循环归属 | `src/run.ts` 一条直线循环 | Pi Agent Loop 拥有循环，Core 只管生命周期 | 阶段 2 接 Pi 时评估：交给 SDK，还是把事件流适配成 `ModelReply` |
+| Agent 接口 | 一个返回 `ModelReply` 的函数 + `Map<string, Agent>` | `AgentAdapter` / `AgentSession` / `AgentBridge` | 阶段 2 |
+| 工具 | `ToolDefinition` 数组，循环内查找、校验与审批 | `ToolRegistry` + `ToolService` 唯一门口 | 阶段 2 以后，出现第二个消费方时 |
+| risk | 三档枚举实际只有 `read` / 非 `read` 两档行为；`execute` 无工具声明，`ApprovalRequest.risk` 无读取方 | read / write / execute 分级审批策略 | 阶段 4 出现真实写入与命令工具时 |
+| 装配 | `cli.ts` 一处注入 | `create-app.ts` 唯一装配根，CLI 与 Main 共用 | 阶段 3 出现第二个入口时 |
+| 事件 | 无事件类型；`print(text)` 一个出口 | `AppEvent` 事件链、Main→Renderer 广播 | 阶段 3 需要一对多广播时 |
+| 状态 | `completed / failed / cancelled` 三种终态 | `waiting_approval` / `cancelling` / `interrupted` 状态机 | 阶段 3 / 5 |
+| 取消 | 审批返回 cancel → 循环 `break`；无 `AbortSignal` | 传播 AbortSignal、终止子进程树、UI 显示「取消中」 | 阶段 2 流式输出、阶段 4 命令执行时 |
+| 目录 | 扁平 `src/` + 独立 `tests/` | `main / preload / renderer` 按进程边界展开 | 阶段 3 出现真实进程边界时 |
+
+「何时才引入」是触发条件，不是排期：条件没出现就保持阶段 1 的简单形态，不要先把目标形态的骨架搬进来。
+
 配套文档：
 
 - [分阶段学习路线](../learning/01-roadmap.md)：每一步要理解什么、做出什么、怎样验收。
@@ -113,7 +131,7 @@ Main 中所有业务模块都使用异步操作；扫描文件、读写文件和
 
 ```mermaid
 flowchart BT
-  Contracts[shared/contracts：公共类型]
+  Contracts["contracts.ts / shared/contracts：公共类型"]
   Core[core：协调逻辑和接口] --> Contracts
   Pi[agents/pi：Pi 的具体实现] --> Contracts
   Tools[tools：注册与受控执行] --> Contracts
@@ -127,9 +145,11 @@ flowchart BT
   UI[renderer：界面] --> Contracts
 ```
 
-实际装配集中在 `main/index.ts`：创建服务、注册 Agent/工具/应用，把依赖传给 Core。Core 通过接口使用具体实现，不能 import Pi SDK、Electron、Git 工具或 JSON 文件存储实现。
+上图是引入 Electron 后的目标形态。阶段 1 没有事件链：依赖方向是「`cli.ts` 把注入交给 `run.ts` 的直线循环，`run.ts` 调用 `agents.ts` / `tools.ts`，这些实现只依赖 `contracts.ts` 的类型」。工具与 Agent 都不持有界面回调，打印只在循环里发生。
 
-CLI 将来用自己的入口组装同一套 Core，终端审批替代 GUI 审批。不要为 CLI 写一份循环，再为 Electron 写另一份。
+装配在 `cli.ts` 一次性完成（取注册好的 Agent、系统提示、工具清单，传入 `approve` 与 `print`），没有单独的装配根或生命周期管理器。目标形态下 Core 通过端口接口使用具体实现，不能 import Pi SDK、Electron、Git 工具或 JSON 文件存储实现；这条边界在阶段 2 接 Pi 时才需要落成接口。
+
+阶段 3 出现 Electron 入口时，再把这段注入抽成共用的装配函数，终端审批换成 GUI 审批；不要为 CLI 写一份循环、再为 Electron 写另一份。目前只有 CLI 一个入口，提前抽装配根只会多一层间接。
 
 ## 5. 四个核心扩展点
 
@@ -147,7 +167,23 @@ flowchart LR
   Choice -->|不需要| Answer[本轮回复结束]
 ```
 
-Pi Adapter 把我们定义的接口转换成 Pi 的调用。Core 不需要知道 Pi 的事件名称或工具类型。
+Pi Adapter 把我们定义的接口转换成 Pi 的调用。Core 不需要知道 Pi 的事件名称或工具类型。**下面这组接口是阶段 2 接 Pi 时的目标形态，阶段 1 尚未实现。**
+
+阶段 1 的 Agent 就是一个函数签名，注册只是一张 `Map<string, Agent>`：
+
+```typescript
+type Agent = (
+  messages: ChatMessage[],
+  tools: ToolDefinition[],
+) => ModelReply | Promise<ModelReply>;
+
+type ModelReply =
+  | { kind: "message"; text: string }
+  | { kind: "tool_call"; name: string; input: unknown }
+  | { kind: "done" };
+```
+
+目标形态（阶段 2+）：
 
 ```typescript
 interface AgentAdapter {
@@ -181,9 +217,12 @@ Pi 的工具 `execute` 是代理函数：必须 await `bridge.invokeTool()`。�
 
 ### 5.2 Tool Registry：找到工具；ToolService：决定能否执行
 
+**本节是阶段 2+ 的目标形态。** 阶段 1 没有 Registry / Service 两个类，也没有 `id` 字段：工具就是一个 `ToolDefinition[]` 数组，由 `cli.ts` 注入，`run.ts` 循环按 `name` 查找、Ajv 校验、按 `risk === "read"` 决定是否审批，然后直接调用 `run()`。当前签名是 `{ name, description, inputSchema, risk, run }`，与下面的目标接口同名但不同形。
+
 Registry 像一本通讯录，保存工具定义和实现；ToolService 才是所有调用的门口。注册一个工具不代表它已经获得批准。
 
 ```typescript
+// 目标形态（阶段 2+），不是阶段 1 的签名
 interface ToolDefinition {
   id: string;
   description: string;
@@ -200,6 +239,8 @@ interface RegisteredTool {
 `ToolContext` 包含当前 Run 身份、固定的工作区、取消信号和所需服务。`ToolResult` 保存结构化结果和供模型阅读的文字；完整长输出保存为本地文件引用。
 
 工具定义的 `risk` 来自受信任代码，不能由模型指定。相同工具 ID 重复注册直接报错。可向模型暴露的工具集合在 Run 开始时固定，调用时仍需单独审批。
+
+**阶段 1 对 risk 的兑现程度**：「来自受信任代码」已成立（模型只回 `{ name, input }`）；但三档分级策略还没实现——`ToolRisk` 虽是 `read | write | execute`，循环只区分 `read` 与「非 read」，`execute` 没有任何工具声明，`ApprovalRequest.risk` 也没有读取方。分级策略留到阶段 4 有真实写入与命令工具时再定，见[阶段 1 说明](../stages/01-cli-mock.md)「risk 现在到底做什么」。
 
 工具 ID 采用 `coding.read_file` 这样的内部命名。部分模型协议对工具名字符有限制，Pi Adapter 将其转换成合法模型工具名，例如 `coding_read_file`，检查冲突并保存反向映射。协议细节不改变产品内部 ID。
 
@@ -285,7 +326,7 @@ sequenceDiagram
 
 图中的 A 到 R、R 到 C/T 都通过 Core 和 Preload/IPC；为了可读性省略中间转发线。UI 完全不调用工具 Handler。
 
-循环的所有者是 Pi；RunManager 只负责生命周期、订阅、取消和保存。不能再在 RunManager 外面写一个“模型请求—工具执行”的重复循环。
+目标形态（阶段 2+）里循环的所有者是 Pi；RunManager 只负责生命周期、订阅、取消和保存，不能再在 RunManager 外面写一个“模型请求—工具执行”的重复循环。**阶段 1 的当前实现相反**：`src/run.ts` 拥有一条直线循环，Agent 只是一个「给上下文、返回下一步」的函数，因为此时还没有引入 Pi SDK。接 Pi 时再评估是把循环交给 SDK、还是把 SDK 的事件流适配成 `ModelReply`。
 
 ## 7. 状态、审批与取消
 
@@ -308,6 +349,8 @@ erDiagram
 首版全应用同一时刻只运行一个 Run。正在运行时拒绝新的 startRun，并给出“请等待或取消”的明确状态；先不实现后台队列和 steering。
 
 ### 7.2 Run 状态图
+
+下图是目标形态（阶段 2+）。阶段 1 的 `RunResult.status` 只有 `completed / failed / cancelled` 三种终态：没有 `waiting_approval`、`cancelling`、`interrupted`，也没有单活动 Run 的互斥检查——审批与取消都是直线循环里的一个分支，不需要中间状态。
 
 ```mermaid
 stateDiagram-v2
@@ -350,6 +393,8 @@ flowchart TD
 ```
 
 首版只支持允许一次、拒绝一次、取消任务。审批按 approvalId 查找 Main 保存的请求；Renderer 只能返回决定，不能在批准时偷偷更换路径、命令或工具参数。
+
+**阶段 1 的对应实现比上图简单**：`run.ts` 里只有 `risk === "read"` 一个分支，read 直接执行，其余档位统一走 `approve`；审批函数自己展示参数并返回 `allow / deny / cancel`，`cancel` 就是循环里的 `break`。没有 approvalId、不可变请求保存、AbortSignal 传播或「取消中」状态——这些是阶段 3 / 4 的能力。
 
 取消时结束待审批 Promise，向 Agent 与 ToolContext 传播 AbortSignal，终止命令进程树。UI 显示“取消中”，收到停止确认后才显示“已取消”。重复批准或取消后批准都不能执行工具。
 
@@ -433,13 +478,38 @@ Diff 应区分运行前已有修改和本次文件工具的修改。只展示工
 
 ## 10. 单项目目录与学习入口
 
+### 10.1 当前：扁平 `src/` + 独立 `tests/`
+
+阶段 1 的实现是 6 个文件、约 390 行，测试另有 3 个文件、约 240 行。把 `shared / app / workspace / main / cli` 各建成目录，平均一个目录放两个文件，读代码只是在跳目录；把工具与打印用事件链连起来，更是比直接调用 LLM API 还绕。**先用 import 方向表达分层**；唯一保留的目录划分是"实现 `src/` / 验证 `tests/`"。
+
+```text
+src/
+  contracts.ts    ToolDefinition / ChatMessage / ModelReply / Agent / RunOptions 等纯类型
+  workspace.ts    工作区路径边界，文件工具共用
+  tools.ts        工具清单（demo.*、coding.read_file）+ 参数校验
+  agents.ts       id → Agent 注册表 + 阶段 1 的 Mock 实现
+  run.ts          直线循环：判断 message/tool → 校验 → 权限 → 执行 → 打印 → 回灌
+  cli.ts          注入 Agent/prompt/tools，提供 approve 与 print 两个边界函数
+tests/
+  tools.test.ts / applications.test.ts / run.test.ts
+```
+
+注入发生在 `cli.ts` 调用 `runTask(...)` 的一处：模型（Agent）、系统提示、工具清单，加上审批和打印两个函数。工具 `run()` 只返回 `ToolResult`，不 import `cli.ts`、不持有打印回调；打印只有一个出口。
+
+允许的 import 方向：`contracts.ts` 谁都不依赖；`workspace.ts` / `tools.ts` / `agents.ts` 只依赖 `contracts.ts`（`tools.ts` 另可用 `workspace.ts`）；`run.ts` 依赖 `contracts.ts` 与 `tools.ts`；只有 `cli.ts` 同时 import 实现并把注入组装起来；`tests/` 可以 import `src/`，反之禁止。`tsconfig.json` 的 `include` 覆盖两个目录，测试代码同样参与类型检查。将来用 dependency-cruiser 把"工具不得依赖入口"写成可执行检查，而不是靠目录位置暗示。
+
+### 10.2 目标：引入 Electron 后
+
+出现真实的进程边界时再展开目录。此时目录对应的是运行边界（Main / Preload / Renderer），不是概念分层；上面的扁平文件只是搬进去，不改业务逻辑。
+
 ```text
 src/
   shared/
-    contracts/                    接口、事件、DTO；不 import Pi/Electron
+    contracts/                    公共类型 + 跨层端口；不 import Pi/Electron
     applications/                 仅包含应用 Manifest 声明
-  cli/
-    index.ts                      学习用 CLI；装配相同 Core
+  create-app.ts                  唯一装配根；CLI 与 Main 共用
+  workspace.ts                   工作区路径边界，文件工具共用
+  cli.ts                         学习用 CLI；只做终端 I/O 与审批
   main/
     index.ts                      Electron 入口与依赖装配
     ipc/                          输入校验与请求路由
@@ -456,7 +526,10 @@ src/
     App.tsx                       通用聊天与会话界面
     components/                   工具、审批、错误卡片
     applications/coding/          Diff、命令输出场景视图
+tests/                            单元与集成测试；始终独立于实现目录
 ```
+
+拆目录的触发条件：单个文件大到内部出现两三个互不相关的概念；出现第二个独立消费方需要独立发包或构建矩阵；或某层依赖集明显变重需要隔离（阶段 2 的 Provider SDK 最可能）。反过来说，只是"觉得该分层了"不是理由。
 
 只在用到时创建文件。不要为了填目录先写几十个空类。更多阶段拆解见[学习路线](../learning/01-roadmap.md)。
 
